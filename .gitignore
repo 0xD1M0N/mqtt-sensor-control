@@ -7,3 +7,9 @@
 *.map
 *.d
 *.o
+
+.sdkconfig
+.sdkconfig.old
+
+*.log
+
