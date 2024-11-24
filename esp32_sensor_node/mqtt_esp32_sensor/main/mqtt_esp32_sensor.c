@@ -2,13 +2,13 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "dht.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "mqtt_client.h"
-#include "esp_ping.h"
 
 #define STA_SSID ""
 #define STA_PASSWORD ""
@@ -16,12 +16,17 @@
 #define DHT_PIN GPIO_NUM_5
 #define SENSOR_TYPE DHT_TYPE_DHT11
 
+#define DEFAULT_INTERVAL_MS 5000
+
 static const char *TAG = "ESP32_APP";
 static const char *DHT_TAG = "DHT11";
 static const char *WIFI_TAG = "WiFi";
 static const char *MQTT_TAG = "MQTT";
 
 static esp_mqtt_client_handle_t mqtt_client = NULL;
+static uint32_t publish_interval_ms = DEFAULT_INTERVAL_MS;
+static SemaphoreHandle_t interval_mutex;
+
 
 static void wifi_event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT) {
@@ -58,11 +63,35 @@ static void wifi_event_handler(void *ctx, esp_event_base_t event_base, int32_t e
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
     esp_mqtt_event_handle_t event = event_data;
-    esp_mqtt_client_handle_t client = event->client;
 
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(MQTT_TAG, "MQTT_EVENT_CONNECTED");
+
+            esp_mqtt_client_subscribe(mqtt_client, "esp32/control", 1);
+            ESP_LOGI(MQTT_TAG, "Subscribed to topic: esp32/control");
+            break;
+
+        case MQTT_EVENT_DATA:
+            ESP_LOGI(MQTT_TAG, "MQTT_EVENT_DATA");
+
+            char topic[128];
+            char data[128];
+            snprintf(topic, event->topic_len + 1, "%.*s", event->topic_len, event->topic);
+            snprintf(data, event->data_len + 1, "%.*s", event->data_len, event->data);
+            ESP_LOGI(MQTT_TAG, "Received data on topic %s: %s", topic, data);
+
+            if (strcmp(topic, "esp32/control") == 0 && strncmp(data, "CHANGE_INTERVAL", 15) == 0) {
+                int new_interval = atoi(data + 16);
+                if (new_interval >= 1000 && new_interval <= 60000) {
+                    xSemaphoreTake(interval_mutex, portMAX_DELAY);
+                    publish_interval_ms = new_interval;
+                    xSemaphoreGive(interval_mutex);
+                    ESP_LOGI(MQTT_TAG, "Interval updated to %lu ms", publish_interval_ms);
+                } else {
+                    ESP_LOGE(MQTT_TAG, "Invalid interval value: %i. Must be between 1000 and 60000.", new_interval);
+                }
+            }
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -103,7 +132,11 @@ void dht_task(void *pvParameter) {
             ESP_LOGE(DHT_TAG, "Error reading data from DHT sensor: %s", esp_err_to_name(result));
         }
 
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        xSemaphoreTake(interval_mutex, portMAX_DELAY);
+        uint32_t current_interval = publish_interval_ms;
+        xSemaphoreGive(interval_mutex);
+
+        vTaskDelay(pdMS_TO_TICKS(current_interval));
     }
 }
 
@@ -141,6 +174,8 @@ void app_main(void) {
 
     gpio_set_direction(DHT_PIN, GPIO_MODE_INPUT);
     gpio_set_pull_mode(DHT_PIN, GPIO_PULLUP_ONLY);
+
+    interval_mutex = xSemaphoreCreateMutex();
 
     xTaskCreate(dht_task, "dht_task", 4096, NULL, 5, NULL);
 }
