@@ -1,0 +1,15 @@
+/build/
+/cmake-build-debug/
+/cmake-build-release/
+
+*.bin
+*.elf
+*.map
+*.d
+*.o
+
+.sdkconfig
+.sdkconfig.old
+
+*.log
+
